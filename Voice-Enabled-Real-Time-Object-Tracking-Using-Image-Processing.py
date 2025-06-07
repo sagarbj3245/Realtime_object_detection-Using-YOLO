@@ -1,5 +1,3 @@
-#BEST CHOICE AMONGST ALL!!! This is the latest code... It Speaks 'Object-Detected' Whenever a new object is detected or the count of the existing object increases..(COUNT ISSUE!)
-
 import cv2
 import supervision as sv
 import numpy as np
@@ -19,48 +17,40 @@ model.fuse()
 # Dict mapping class_id to class_name
 CLASS_NAMES_DICT = model.model.names
 
-# List of class IDs to track in the video stream
-selected_classes = [0, 2, 3, 5, 23, 25, 39, 44, 56, 63, 64, 66, 76, 76]
+# Unique class IDs to track in the video stream
+selected_classes = list(set([0, 2, 3, 5, 23, 25, 39, 44, 56, 63, 64, 66, 76]))
 
 # Create instance of BoxAnnotator for drawing bounding boxes
 box_annotator = sv.BoxAnnotator(thickness=2, text_thickness=2, text_scale=1)
 
 # Initialize text-to-speech engine
 engine = pyttsx3.init()
-engine.setProperty('rate', 150)     # Set speech rate
-engine.setProperty('volume', 0.9)   # Set volume level
+engine.setProperty('rate', 150)
+engine.setProperty('volume', 0.9)
 
 def speak_summary(counts):
     """
     Generate and speak out the summary of detected objects.
-    
-    Args:
-        counts (Counter): A Counter object with class IDs and counts of detected objects.
     """
-    # Generate a summary of detected objects
-    summary = ", ".join(f"{CLASS_NAMES_DICT[class_id]} detected" for class_id in counts)
-    
-    # Use text-to-speech engine to say the summary
+    summary = ", ".join(
+        f"{count} {CLASS_NAMES_DICT[class_id]}{'s' if count > 1 else ''} detected"
+        for class_id, count in counts.items()
+    )
     engine.say(summary)
     engine.runAndWait()
 
 def audio_thread(new_detections, stop_event):
     """
     Thread function to periodically speak out detected objects.
-    
-    Args:
-        new_detections (Counter): A Counter object with new detections.
-        stop_event (threading.Event): An event object to signal thread termination.
     """
     while not stop_event.is_set():
-        # Speak out the detected objects if any are found
         if new_detections:
             speak_summary(new_detections)
-            new_detections.clear()  # Clear the detections after speaking
-        time.sleep(1)  # Wait for 1 second before checking again
+            new_detections.clear()
+        time.sleep(1)
 
 # Open webcam for video capture
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture("http://192.168.43.1:8080/video")
 if not cap.isOpened():
     print("Error: Could not open video capture.")
     exit()
@@ -70,69 +60,66 @@ frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
 # Start the audio thread
-new_detections = Counter()       # Counter for keeping track of new detections
-stop_event = threading.Event()   # Event to signal stopping the audio thread
+new_detections = Counter()
+stop_event = threading.Event()
 thread = threading.Thread(target=audio_thread, args=(new_detections, stop_event))
 thread.daemon = True
 thread.start()
 
-# To keep track of previous counts for comparison
+# To keep track of previous counts
 prev_counts = Counter()
 
-# Main loop for processing video frames
 while True:
     ret, frame = cap.read()
     if not ret:
         break
 
-    # Resize frame for faster processing
+    # Resize for faster processing
     small_frame = cv2.resize(frame, (frame_width // 2, frame_height // 2))
 
-    # Model prediction on the resized frame
     try:
         results = model(small_frame, verbose=False)[0]
-        detections = sv.Detections.from_ultralytics(results)
 
-        # Adjust detections to the original frame size
+        # Manually create Detections object
+        detections = sv.Detections(
+            xyxy=results.boxes.xyxy.cpu().numpy(),
+            confidence=results.boxes.conf.cpu().numpy(),
+            class_id=results.boxes.cls.cpu().numpy().astype(int)
+        )
+
+        # Scale detections back to original frame size
         detections.xyxy *= 2
 
-        # Filter detections to only include selected classes
+        # Filter to only selected classes
         detections = detections[np.isin(detections.class_id, selected_classes)]
 
-        # Count objects by class for the current frame
+        # Count current objects
         current_counts = Counter(detections.class_id)
 
-        # Detect new objects or increases in counts
+        # Detect new or increased counts
         for class_id, count in current_counts.items():
             if count > prev_counts.get(class_id, 0):
-                new_detections[class_id] += count - prev_counts[class_id]
+                new_detections[class_id] += count - prev_counts.get(class_id, 0)
 
-        # Update previous counts for the next iteration
         prev_counts = current_counts.copy()
 
-        # Format custom labels with counts and confidence
+        # Prepare labels for drawing
         labels = [
             f"{CLASS_NAMES_DICT[class_id]} {current_counts[class_id]} {confidence:0.2f}"
             for class_id, confidence in zip(detections.class_id, detections.confidence)
         ]
 
-        # Annotate frame with bounding boxes and labels
+        # Draw boxes and labels
         annotated_frame = box_annotator.annotate(scene=frame, detections=detections, labels=labels)
-
-        # Display the annotated frame
         cv2.imshow('YOLOv8 Real-time Detection', annotated_frame)
 
     except Exception as e:
-        # Print any errors encountered during processing
         print(f"Error: {e}")
 
-    # Break the loop on 'q' key press
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
-# Release the video capture object and close all OpenCV windows
+# Clean exit
 cap.release()
 cv2.destroyAllWindows()
-
-# Signal the audio thread to stop and wait for it to finish
 stop_event.set()
